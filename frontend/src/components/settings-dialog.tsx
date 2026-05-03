@@ -69,8 +69,8 @@ function TranscribeSettings() {
         <div>
           <Label htmlFor="use-yt-captions" className="text-sm font-medium cursor-pointer">Use YouTube Captions</Label>
           <p className="text-xs text-muted-foreground mt-1">
-            When available, use YouTube's closed captions instead of running Whisper.
-            Uncheck to always run Whisper STT.
+            Faster, but worse for dubbing sync because caption segments are much longer than spoken phrases.
+            Leave this off to run Whisper STT and get tighter timing.
           </p>
         </div>
       </div>
@@ -100,8 +100,8 @@ function TranslateSettings() {
 }
 
 const ALIGNMENT_METHODS = [
-  { value: "baseline", label: "Baseline", description: "No temporal alignment — TTS audio plays at natural speed." },
-  { value: "aligned", label: "Aligned", description: "Syllable-based stretch/compress to match original segment timing." },
+  { value: "aligned", label: "Aligned", description: "Recommended — keeps dubbed speech closer to the original on-screen timing." },
+  { value: "baseline", label: "Baseline", description: "Natural voice pacing, but it can drift ahead of or behind the speaker on screen." },
 ];
 
 function AlignmentSettings() {

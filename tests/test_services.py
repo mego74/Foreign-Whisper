@@ -107,6 +107,53 @@ class TestTranscriptionService:
         assert result["text"] == "Hello world"
         assert result["language"] == "en"
 
+    def test_transcribe_splits_overlong_segments(self, tmp_path):
+        from api.src.services.transcription_service import TranscriptionService
+
+        mock_model = MagicMock()
+        mock_model.transcribe.return_value = {
+            "text": "Hello world this is one sentence, and here is another sentence to split.",
+            "language": "en",
+            "segments": [
+                {
+                    "id": 0,
+                    "start": 0.0,
+                    "end": 6.0,
+                    "text": "Hello world this is one sentence, and here is another sentence to split.",
+                }
+            ],
+        }
+
+        svc = TranscriptionService(ui_dir=tmp_path, whisper_model=mock_model)
+        video_path = tmp_path / "video.mp4"
+        video_path.write_bytes(b"fake")
+
+        result = svc.transcribe(str(video_path))
+
+        assert len(result["segments"]) >= 2
+        assert result["segments"][0]["start"] == pytest.approx(0.0)
+        assert result["segments"][-1]["end"] == pytest.approx(6.0)
+        assert all(seg["end"] > seg["start"] for seg in result["segments"])
+
+    def test_transcribe_preserves_short_segments(self, tmp_path):
+        from api.src.services.transcription_service import TranscriptionService
+
+        mock_model = MagicMock()
+        mock_model.transcribe.return_value = {
+            "text": "Hello world",
+            "language": "en",
+            "segments": [{"id": 0, "start": 0.0, "end": 2.0, "text": "Hello world"}],
+        }
+
+        svc = TranscriptionService(ui_dir=tmp_path, whisper_model=mock_model)
+        video_path = tmp_path / "video.mp4"
+        video_path.write_bytes(b"fake")
+
+        result = svc.transcribe(str(video_path))
+
+        assert len(result["segments"]) == 1
+        assert result["segments"][0]["text"] == "Hello world"
+
     def test_title_for_video_id(self, tmp_path):
         from api.src.services.transcription_service import TranscriptionService
 

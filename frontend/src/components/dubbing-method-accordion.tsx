@@ -9,8 +9,8 @@ interface DubbingMethodAccordionProps {
 }
 
 const METHODS = [
-  { value: "baseline", label: "Baseline", description: "No temporal alignment" },
-  { value: "aligned", label: "Aligned", description: "Syllable-based stretch to match original timing" },
+  { value: "aligned", label: "Aligned", description: "Recommended — keeps speech closer to the video timing" },
+  { value: "baseline", label: "Baseline", description: "Natural pacing, but may drift out of sync" },
 ];
 
 export function DubbingMethodAccordion({ selected, onToggle }: DubbingMethodAccordionProps) {

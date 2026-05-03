@@ -65,7 +65,7 @@ def test_transcribe_returns_segments(client, monkeypatch, ui_dir):
     assert body["video_id"] == "G3Eup4mfJdA"
     assert body["language"] == "en"
     assert len(body["segments"]) == 1
-    assert body["segments"][0]["text"] == " Hello world"
+    assert body["segments"][0]["text"] == "Hello world"
 
 
 def test_transcribe_saves_json(client, monkeypatch, ui_dir):

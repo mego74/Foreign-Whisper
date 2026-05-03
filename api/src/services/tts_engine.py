@@ -7,6 +7,7 @@ import glob
 import shutil
 import subprocess
 import tempfile
+import re
 
 import requests
 import librosa
@@ -23,14 +24,11 @@ CHATTERBOX_SPEAKER_WAV = os.getenv("CHATTERBOX_SPEAKER_WAV", "")
 # Default is "on" (new clamped path). Useful for A/B comparisons.
 _ALIGNMENT_ENABLED = os.getenv("FW_ALIGNMENT", "on").lower() != "off"
 
-SPEED_MIN = 0.75
+SPEED_MIN = 1.0
 SPEED_MAX = 1.25
-# When TTS audio is less than this fraction of the target window, skip
-# time-stretching entirely — play at natural speed and pad with silence.
-# Prevents comically slow speech in windows with long narrator pauses.
-_STRETCH_SKIP_RATIO = 0.5
 _SPEED_MIN_LEGACY = 0.1
 _SPEED_MAX_LEGACY = 10.0
+_TRIM_TOLERANCE_MS = 60
 
 
 class SyncedSegmentAudio(AudioSegment):
@@ -287,15 +285,53 @@ def _synthesize_raw(
     """GPU-bound: call TTS engine and return raw WAV bytes, or None on failure."""
     if tts_engine is None or not text or not text.strip():
         return None
-    try:
-        kwargs = {}
-        if speaker_wav is not None:
-            kwargs["speaker_wav"] = speaker_wav
-        tts_engine.tts_to_file(text=text, file_path=wav_path, **kwargs)
-        return pathlib.Path(wav_path).read_bytes()
-    except Exception as exc:
-        print(f"[tts] TTS failed for segment ({exc}), using silence")
-        return None
+
+    def _candidate_texts(raw_text: str) -> list[str]:
+        candidates: list[str] = []
+
+        def _add(value: str) -> None:
+            cleaned = re.sub(r"\s+", " ", value).strip()
+            if cleaned and cleaned not in candidates:
+                candidates.append(cleaned)
+
+        _add(raw_text)
+
+        normalized = raw_text.replace("¿", "").replace("¡", "")
+        normalized = re.sub(r"^[>\-\s]+", "", normalized)
+        normalized = re.sub(r"\.{2,}", ".", normalized)
+        normalized = re.sub(r"\s+([,.;:!?])", r"\1", normalized)
+        normalized = normalized.strip(" \"'")
+        _add(normalized)
+        _add(normalized.strip(".,;:!?"))
+
+        return candidates
+
+    kwargs = {}
+    if speaker_wav is not None:
+        kwargs["speaker_wav"] = speaker_wav
+
+    last_exc: Exception | None = None
+    candidates = _candidate_texts(text)
+
+    for candidate in candidates:
+        try:
+            tts_engine.tts_to_file(text=candidate, file_path=wav_path, **kwargs)
+            return pathlib.Path(wav_path).read_bytes()
+        except Exception as exc:
+            last_exc = exc
+
+    if not isinstance(tts_engine, MacSayClient) and shutil.which("say"):
+        backup_engine = MacSayClient()
+        for candidate in candidates:
+            try:
+                backup_engine.tts_to_file(text=candidate, file_path=wav_path)
+                print("[tts] Falling back to macOS say for one segment")
+                return pathlib.Path(wav_path).read_bytes()
+            except Exception as exc:
+                last_exc = exc
+
+    print(f"[tts] TTS failed for segment ({last_exc}), using silence")
+    return None
 
 
 def _time_stretch_audio(y, sr: int, speed_factor: float):
@@ -334,15 +370,18 @@ def _postprocess_segment(raw_wav_bytes: bytes | None, target_sec: float,
     duration_ratio = raw_duration / target_sec
 
     if not alignment_enabled:
-        speed_factor = duration_ratio
-        speed_factor = max(_SPEED_MIN_LEGACY, min(_SPEED_MAX_LEGACY, speed_factor))
-    elif duration_ratio < _STRETCH_SKIP_RATIO:
-        # TTS is dramatically shorter than target — narrator was pausing.
-        # Play at natural speed; silence padding below handles the gap.
+        # Baseline mode should preserve the raw voice pacing. Any remaining
+        # difference from the source window is handled by silence padding or
+        # downstream drift rather than slowing or clipping the speaker.
         speed_factor = 1.0
     else:
         effective_target = target_sec * max(stretch_factor, 0.1)
+        # In aligned mode, preserve natural speech when the synthesized segment
+        # already fits inside the available window. Padding with silence sounds
+        # better than artificially slowing the voice to fill every pause.
         speed_factor = raw_duration / effective_target
+        if speed_factor < 1.0:
+            speed_factor = 1.0
         speed_factor = max(SPEED_MIN, min(SPEED_MAX, speed_factor))
 
     if abs(speed_factor - 1.0) > 0.01:
@@ -358,7 +397,21 @@ def _postprocess_segment(raw_wav_bytes: bytes | None, target_sec: float,
     if len(segment_audio) < target_ms:
         segment_audio += AudioSegment.silent(duration=target_ms - len(segment_audio))
     elif len(segment_audio) > target_ms:
-        segment_audio = segment_audio[:target_ms]
+        overflow_ms = len(segment_audio) - target_ms
+        if not alignment_enabled:
+            # Baseline mode keeps the full utterance even if it drifts.
+            pass
+        elif overflow_ms <= _TRIM_TOLERANCE_MS:
+            # Minor resampling jitter can safely be cropped.
+            segment_audio = segment_audio[:target_ms]
+        elif speed_factor < SPEED_MAX - 1e-6:
+            # We expected this segment to fit the aligned window; crop only when
+            # we still had playback headroom and the excess is likely incidental.
+            segment_audio = segment_audio[:target_ms]
+        else:
+            # We hit the safe speed ceiling and still overflowed — keep the full
+            # utterance instead of cutting words off.
+            pass
 
     return (segment_audio, speed_factor, raw_duration)
 
@@ -572,6 +625,15 @@ def text_file_to_speech(
         aligned_seg = align_map.get(i)
         stretch_factor = aligned_seg.stretch_factor if aligned_seg else 1.0
         target_sec = seg["end"] - seg["start"]
+        scheduled_target_sec = target_sec
+        scheduled_start = seg["start"]
+
+        if use_alignment and aligned_seg is not None:
+            scheduled_start = aligned_seg.scheduled_start
+            scheduled_target_sec = max(
+                aligned_seg.scheduled_end - aligned_seg.scheduled_start,
+                0.0,
+            )
 
         seg_text = seg["text"]
         if aligned_seg is not None:
@@ -586,9 +648,10 @@ def text_file_to_speech(
         seg_metas.append({
             "index": i,
             "text": seg_text,
-            "start": seg["start"],
+            "start": scheduled_start,
             "end": seg["end"],
             "target_sec": target_sec,
+            "scheduled_target_sec": scheduled_target_sec,
             "stretch_factor": stretch_factor,
             "aligned_seg": aligned_seg,
             "speaker": seg.get("speaker"),
@@ -618,17 +681,17 @@ def text_file_to_speech(
                 synced = _synced_segment_audio(
                     engine,
                     m["text"],
-                    m["target_sec"],
+                    m["scheduled_target_sec"],
                     tmpdir,
-                    m["stretch_factor"],
+                    1.0,
                 )
             else:
                 synced = _synced_segment_audio(
                     engine,
                     m["text"],
-                    m["target_sec"],
+                    m["scheduled_target_sec"],
                     tmpdir,
-                    stretch_factor=m["stretch_factor"],
+                    stretch_factor=1.0 if use_alignment else m["stretch_factor"],
                     alignment_enabled=use_alignment,
                     speaker_wav=m["speaker_wav"],
                 )

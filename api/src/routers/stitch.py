@@ -18,10 +18,11 @@ _stitch_service = StitchService(ui_dir=settings.data_dir)
 
 
 def _segments_to_vtt(segments: list[dict]) -> str:
-    """Convert transcript segments to rolling two-line WebVTT format.
+    """Convert transcript segments to standard WebVTT cues.
 
-    Mimics Google-style captions: each cue shows the current line on top
-    and the previous line on the bottom, creating a smooth reading bridge.
+    Each cue contains only the current subtitle text. Rolling two-line cues
+    looked nice in isolation but produce stacked duplicate text in browsers
+    when adjacent cue windows overlap.
     """
     # Filter to non-empty segments first
     segs = [s for s in segments if s.get("text", "").strip()]
@@ -29,19 +30,14 @@ def _segments_to_vtt(segments: list[dict]) -> str:
         return "WEBVTT\n"
 
     lines = ["WEBVTT", ""]
-    prev_text: str | None = None
     for i, seg in enumerate(segs, 1):
         start = _format_vtt_time(seg["start"])
         end = _format_vtt_time(seg["end"])
         text = seg.get("text", "").strip()
         lines.append(str(i))
         lines.append(f"{start} --> {end}")
-        if prev_text:
-            lines.append(f"{text}\n{prev_text}")
-        else:
-            lines.append(text)
+        lines.append(text)
         lines.append("")
-        prev_text = text
     return "\n".join(lines)
 
 
@@ -144,10 +140,9 @@ async def get_captions(video_id: str):
 
 
 def _youtube_captions_to_vtt(caption_path: pathlib.Path) -> str:
-    """Convert YouTube line-delimited JSON captions to rolling two-line WebVTT.
+    """Convert YouTube line-delimited JSON captions to standard WebVTT cues.
 
     YouTube format: {"text": "...", "start": float, "duration": float} per line.
-    Uses the same rolling bridge style as _segments_to_vtt.
     """
     # Parse and filter valid segments first
     segs: list[tuple[float, float, str]] = []
@@ -166,16 +161,11 @@ def _youtube_captions_to_vtt(caption_path: pathlib.Path) -> str:
         return "WEBVTT\n"
 
     lines_out = ["WEBVTT", ""]
-    prev_text: str | None = None
     for i, (start, end, text) in enumerate(segs, 1):
         lines_out.append(str(i))
         lines_out.append(f"{_format_vtt_time(start)} --> {_format_vtt_time(end)}")
-        if prev_text:
-            lines_out.append(f"{text}\n{prev_text}")
-        else:
-            lines_out.append(text)
+        lines_out.append(text)
         lines_out.append("")
-        prev_text = text
     return "\n".join(lines_out)
 
 

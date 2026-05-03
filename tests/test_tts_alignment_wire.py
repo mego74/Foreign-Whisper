@@ -37,7 +37,7 @@ def test_synced_segment_stretch_factor_changes_speed(monkeypatch):
 
 
 def test_synced_segment_clamp_applied(monkeypatch):
-    """Speed factor is clamped to [0.85, 1.25] in alignment-enabled mode."""
+    """Speed factor is clamped to [1.0, 1.25] in alignment-enabled mode."""
     import api.src.services.tts_engine as tts
     monkeypatch.setattr(tts, "_ALIGNMENT_ENABLED", True)
     from api.src.services.tts_engine import _synced_segment_audio
@@ -58,11 +58,67 @@ def test_synced_segment_clamp_applied(monkeypatch):
         audio, sf_val, rd = _synced_segment_audio(engine, "test", target_sec=1.0, work_dir=tmpdir, stretch_factor=1.0)
         assert audio is not None
         assert sf_val <= 1.25 + 1e-9
-        assert sf_val >= 0.85 - 1e-9  # also within lower bound
+        assert sf_val >= 1.0 - 1e-9  # natural-speed floor in aligned mode
 
 
-def test_text_file_to_speech_calls_alignment(tmp_path):
-    """text_file_to_speech calls _build_alignment and passes its stretch_factor."""
+def test_synced_segment_does_not_slow_down_short_audio(monkeypatch):
+    """Aligned mode keeps natural speed when raw TTS already fits the window."""
+    import api.src.services.tts_engine as tts
+    monkeypatch.setattr(tts, "_ALIGNMENT_ENABLED", True)
+    from api.src.services.tts_engine import _synced_segment_audio
+    import numpy as np
+    import soundfile as sf
+
+    sr = 22050
+    with tempfile.TemporaryDirectory() as tmpdir:
+        raw_wav = pathlib.Path(tmpdir) / "source_1s.wav"
+        sf.write(str(raw_wav), np.zeros(sr, dtype=np.float32), sr)
+
+        engine = MagicMock()
+
+        def fake_tts(text, file_path, **kwargs):
+            import shutil
+            shutil.copy(raw_wav, file_path)
+
+        engine.tts_to_file.side_effect = fake_tts
+
+        audio, sf_val, _ = _synced_segment_audio(
+            engine,
+            "hola",
+            target_sec=2.0,
+            work_dir=tmpdir,
+            stretch_factor=1.0,
+        )
+
+        assert audio is not None
+        assert sf_val == pytest.approx(1.0, abs=0.01)
+
+
+def test_synthesize_raw_retries_with_cleaned_text(tmp_path):
+    """Segments with noisy cue markers retry with cleaned text before failing."""
+    from api.src.services.tts_engine import _synthesize_raw
+    from pydub import AudioSegment
+
+    out_path = tmp_path / "segment.wav"
+    engine = MagicMock()
+
+    def fake_tts(text, file_path, **kwargs):
+        if text.startswith(">") or "¿" in text:
+            raise RuntimeError("bad tokenization")
+        AudioSegment.silent(duration=300).export(file_path, format="wav")
+
+    engine.tts_to_file.side_effect = fake_tts
+
+    raw = _synthesize_raw(engine, "> ¿Hola mundo?", str(out_path))
+
+    assert raw is not None
+    assert out_path.exists()
+    attempted_texts = [call.kwargs["text"] for call in engine.tts_to_file.call_args_list]
+    assert any(text == "Hola mundo?" for text in attempted_texts)
+
+
+def test_text_file_to_speech_uses_aligned_schedule(tmp_path):
+    """Aligned synthesis uses the scheduled timing window returned by _build_alignment."""
     from api.src.services.tts_engine import text_file_to_speech
 
     es_seg = {"start": 0.0, "end": 3.0, "text": "Hola mundo"}
@@ -82,26 +138,27 @@ def test_text_file_to_speech_calls_alignment(tmp_path):
     out_dir = tmp_path / "out"
     out_dir.mkdir()
 
-    called_with_stretch = []
+    called_targets = []
 
-    def fake_synced(engine, text, target_sec, work_dir, stretch_factor=1.0):
-        called_with_stretch.append(stretch_factor)
+    def fake_synced(engine, text, target_sec, work_dir, stretch_factor=1.0, **kwargs):
+        called_targets.append(target_sec)
         from pydub import AudioSegment
         return AudioSegment.silent(duration=int(target_sec * 1000)), 1.0, target_sec
 
-    # Patch _build_alignment to return a known stretch_factor so we can verify it propagates
     from foreign_whispers.alignment import AlignAction
     mock_aligned_seg = MagicMock()
     mock_aligned_seg.stretch_factor = 1.2
     mock_aligned_seg.action = AlignAction.MILD_STRETCH
+    mock_aligned_seg.scheduled_start = 0.25
+    mock_aligned_seg.scheduled_end = 3.5
 
     engine = MagicMock()
     with patch("api.src.services.tts_engine._synced_segment_audio", side_effect=fake_synced), \
          patch("api.src.services.tts_engine._build_alignment", return_value=([], {0: mock_aligned_seg})):
-        text_file_to_speech(str(es_path), str(out_dir), tts_engine=engine)
+        text_file_to_speech(str(es_path), str(out_dir), tts_engine=engine, alignment=True)
 
-    assert len(called_with_stretch) == 1
-    assert called_with_stretch[0] == pytest.approx(1.2, abs=0.01)  # propagated from align_map
+    assert len(called_targets) == 1
+    assert called_targets[0] == pytest.approx(3.25, abs=0.01)
 
 
 def test_text_file_to_speech_missing_en_transcript(tmp_path):
@@ -121,7 +178,7 @@ def test_text_file_to_speech_missing_en_transcript(tmp_path):
 
     called_with_stretch = []
 
-    def fake_synced(engine, text, target_sec, work_dir, stretch_factor=1.0):
+    def fake_synced(engine, text, target_sec, work_dir, stretch_factor=1.0, **kwargs):
         called_with_stretch.append(stretch_factor)
         from pydub import AudioSegment
         return AudioSegment.silent(duration=int(target_sec * 1000)), 1.0, target_sec
@@ -138,8 +195,8 @@ def test_text_file_to_speech_missing_en_transcript(tmp_path):
     assert (out_dir / f"{title}.wav").exists()
 
 
-def test_shorten_segment_text_returns_original_when_stub():
-    """_shorten_segment_text returns original ES text when stub returns []."""
+def test_shorten_segment_text_prefers_more_compact_candidate():
+    """_shorten_segment_text returns a shorter phrasing when one is available."""
     from api.src.services.tts_engine import _shorten_segment_text
 
     result = _shorten_segment_text(
@@ -147,7 +204,7 @@ def test_shorten_segment_text_returns_original_when_stub():
         es_text="Esta es una frase muy larga.",
         target_sec=2.0,
     )
-    assert result == "Esta es una frase muy larga."
+    assert len(result) < len("Esta es una frase muy larga.")
 
 
 def test_text_file_to_speech_calls_shorten_for_request_shorter(tmp_path):
@@ -176,7 +233,7 @@ def test_text_file_to_speech_calls_shorten_for_request_shorter(tmp_path):
         shorten_calls.append((en_text, es_text, target_sec))
         return es_text
 
-    def fake_synced(engine, text, target_sec, work_dir, stretch_factor=1.0):
+    def fake_synced(engine, text, target_sec, work_dir, stretch_factor=1.0, **kwargs):
         from pydub import AudioSegment
         return AudioSegment.silent(duration=int(target_sec * 1000)), 1.0, target_sec
 
@@ -184,12 +241,14 @@ def test_text_file_to_speech_calls_shorten_for_request_shorter(tmp_path):
     mock_aligned_seg = MagicMock()
     mock_aligned_seg.stretch_factor = 1.0
     mock_aligned_seg.action = AlignAction.REQUEST_SHORTER
+    mock_aligned_seg.scheduled_start = 0.0
+    mock_aligned_seg.scheduled_end = 3.0
 
     engine = MagicMock()
     with patch("api.src.services.tts_engine._shorten_segment_text", side_effect=fake_shorten), \
          patch("api.src.services.tts_engine._synced_segment_audio", side_effect=fake_synced), \
          patch("api.src.services.tts_engine._build_alignment", return_value=([], {0: mock_aligned_seg})):
-        text_file_to_speech(str(es_dir / f"{title}.json"), str(out_dir), tts_engine=engine)
+        text_file_to_speech(str(es_dir / f"{title}.json"), str(out_dir), tts_engine=engine, alignment=True)
 
     assert len(shorten_calls) == 1, "Expected _shorten_segment_text to be called once"
     assert shorten_calls[0][1] == es_seg["text"]

@@ -158,7 +158,7 @@ def get_shorter_translations(
     Returns:
         Empty list (stub).  Implement to return ``TranslationCandidate`` items.
     """
-    budget_chars = max(int(target_duration_s * 15), 1)
+    budget_chars = max(int(target_duration_s * 13), 1)
     baseline = " ".join(baseline_es.split())
 
     def _clean(text: str) -> str:
@@ -198,6 +198,14 @@ def get_shorter_translations(
         ("vamos a", "vamos"),
         ("estoy yendo a", "voy a"),
         ("no se puede", "imposible"),
+        ("tenemos que", "debemos"),
+        ("hay que", "debemos"),
+        ("es necesario", "hace falta"),
+        ("por lo tanto", "asi que"),
+        ("sin embargo", "pero"),
+        ("ademas", "tambien"),
+        ("con respecto a", "sobre"),
+        ("al mismo tiempo", "mientras"),
     ]
     optional_words = {
         "bueno",
@@ -209,6 +217,10 @@ def get_shorter_translations(
         "solo",
         "solamente",
         "ya",
+        "muy",
+        "tambien",
+        "quizas",
+        "tal vez",
     }
 
     candidates: dict[str, TranslationCandidate] = {}
@@ -256,6 +268,28 @@ def get_shorter_translations(
             " ".join(trimmed_words),
             "trimmed to the time budget",
         )
+
+    if budget_chars < len(baseline):
+        source_hint = _clean(source_text)
+        if source_hint:
+            source_words = source_hint.split()
+            baseline_words = compact_words or compact.split()
+            keyword_budget = max(3, min(len(source_words), max(4, budget_chars // 6)))
+            keywords = [
+                word for word in source_words
+                if len(word) > 3 and word.lower() not in {"this", "that", "with", "from", "have", "will"}
+            ][:keyword_budget]
+            preserved = []
+            for word in baseline_words:
+                normalized = word.strip(".,;:!?").lower()
+                if any(normalized.startswith(key.lower()[:4]) for key in keywords):
+                    preserved.append(word)
+            if preserved:
+                _add_candidate(
+                    candidates,
+                    " ".join(preserved[: max(3, budget_chars // 5)]),
+                    "kept only the core content words for a tight timing budget",
+                )
 
     shorter_candidates = [
         candidate

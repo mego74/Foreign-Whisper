@@ -153,3 +153,42 @@ def test_get_video_not_found(client, monkeypatch, ui_dir):
 
     resp = client.get("/api/video/NONEXISTENT?config=c-0000000")
     assert resp.status_code == 404
+
+
+def test_segments_to_vtt_emits_single_line_cues():
+    """Translated VTT cues should not include the previous subtitle text."""
+    from api.src.routers.stitch import _segments_to_vtt
+
+    vtt = _segments_to_vtt(
+        [
+            {"start": 0.0, "end": 1.0, "text": " Hola"},
+            {"start": 1.0, "end": 2.0, "text": " Mundo"},
+        ]
+    )
+
+    assert "Hola\n" in vtt
+    assert "Mundo\n" in vtt
+    assert "Mundo\nHola" not in vtt
+
+
+def test_get_captions_returns_non_duplicated_vtt(client, monkeypatch, ui_dir):
+    """GET /api/captions should serve one subtitle block per cue."""
+    monkeypatch.setattr(
+        "api.src.routers.stitch.resolve_title",
+        _title_resolver,
+    )
+
+    translation = {
+        "text": "Hola mundo",
+        "language": "es",
+        "segments": [
+            {"id": 0, "start": 0.0, "end": 1.0, "text": "Hola"},
+            {"id": 1, "start": 1.0, "end": 2.0, "text": "Mundo"},
+        ],
+    }
+    (ui_dir / "translations" / "argos" / "Test Title.json").write_text(json.dumps(translation))
+
+    resp = client.get("/api/captions/G3Eup4mfJdA")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/vtt")
+    assert "Mundo\nHola" not in resp.text

@@ -89,8 +89,73 @@ def test_sidecar_records_requested_alignment_mode(tmp_path):
     assert report["alignment_enabled"] is False
 
 
-def test_fw_alignment_off_uses_unclamped_range(tmp_path, monkeypatch):
-    """FW_ALIGNMENT=off bypasses the [0.85, 1.25] clamp (uses legacy [0.1, 10])."""
+def test_baseline_mode_keeps_natural_speed(tmp_path):
+    """Explicit baseline mode should not slow speech down to fill the segment."""
+    from api.src.services.tts_engine import _synced_segment_audio
+    import numpy as np
+    import soundfile as sf
+
+    sr = 22050
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source_wav = pathlib.Path(tmpdir) / "source_1s.wav"
+        sf.write(str(source_wav), np.zeros(sr, dtype=np.float32), sr)
+
+        engine = MagicMock()
+
+        def fake_tts(text, file_path, **kwargs):
+            import shutil
+            shutil.copy(source_wav, file_path)
+
+        engine.tts_to_file.side_effect = fake_tts
+
+        audio, speed_factor, raw_duration = _synced_segment_audio(
+            engine,
+            "hola",
+            target_sec=2.0,
+            work_dir=tmpdir,
+            alignment_enabled=False,
+        )
+
+        assert audio is not None
+        assert raw_duration == pytest.approx(1.0, abs=0.05)
+        assert speed_factor == pytest.approx(1.0, abs=0.01)
+
+
+def test_baseline_mode_does_not_truncate_long_utterances(tmp_path):
+    """Baseline mode should keep the full utterance even when it exceeds the slot."""
+    from api.src.services.tts_engine import _synced_segment_audio
+    import numpy as np
+    import soundfile as sf
+
+    sr = 22050
+    with tempfile.TemporaryDirectory() as tmpdir:
+        source_wav = pathlib.Path(tmpdir) / "source_2s.wav"
+        sf.write(str(source_wav), np.zeros(sr * 2, dtype=np.float32), sr)
+
+        engine = MagicMock()
+
+        def fake_tts(text, file_path, **kwargs):
+            import shutil
+            shutil.copy(source_wav, file_path)
+
+        engine.tts_to_file.side_effect = fake_tts
+
+        audio, speed_factor, raw_duration = _synced_segment_audio(
+            engine,
+            "hola",
+            target_sec=1.0,
+            work_dir=tmpdir,
+            alignment_enabled=False,
+        )
+
+        assert audio is not None
+        assert raw_duration == pytest.approx(2.0, abs=0.05)
+        assert speed_factor == pytest.approx(1.0, abs=0.01)
+        assert len(audio) >= 1950
+
+
+def test_fw_alignment_off_keeps_natural_speed(tmp_path, monkeypatch):
+    """FW_ALIGNMENT=off maps to baseline mode, which keeps natural speech pace."""
     monkeypatch.setenv("FW_ALIGNMENT", "off")
     import importlib, tts
     importlib.reload(tts)  # re-evaluate module-level FW_ALIGNMENT read
@@ -100,9 +165,7 @@ def test_fw_alignment_off_uses_unclamped_range(tmp_path, monkeypatch):
 
     sr = 22050
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Use a different filename from the one _synced_segment_audio writes internally
         source_wav = pathlib.Path(tmpdir) / "source_5s.wav"
-        # 5-second audio into 1-second target → speed = 5.0 → clamped to 1.25 normally
         sf.write(str(source_wav), np.zeros(sr * 5, dtype=np.float32), sr)
 
         engine = MagicMock()
@@ -111,11 +174,6 @@ def test_fw_alignment_off_uses_unclamped_range(tmp_path, monkeypatch):
         engine.tts_to_file.side_effect = fake_tts
 
         result = tts._synced_segment_audio(engine, "test", target_sec=1.0, work_dir=tmpdir)
-        # With legacy clamp [0.1, 10]: speed=5.0 is allowed; result duration ≠ 1s target
-        # With new clamp [0.85, 1.25]: speed would be clamped to 1.25; result ≈ 4s → trimmed to 1s
-        # In legacy mode rubberband applies speed=5.0, result is 5/5=1s — so both modes trim.
-        # The meaningful assertion: no exception, result audio segment is not None.
         audio, sf_val, rd = result
         assert audio is not None
-        # Legacy clamp [0.1, 10]: speed=5.0 for 5s audio / 1s target — unclamped
-        assert sf_val == pytest.approx(5.0, abs=0.1)
+        assert sf_val == pytest.approx(1.0, abs=0.01)

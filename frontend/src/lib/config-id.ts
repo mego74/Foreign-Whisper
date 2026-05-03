@@ -46,9 +46,9 @@ export function computeConfigEntries(settings: StudioSettings): ConfigEntry[] {
   const diarization = [...new Set(settings.diarization)];
   const voiceCloning = [...new Set(settings.voiceCloning)];
 
-  // Default to baseline if nothing selected
+  // Default to aligned if nothing selected
   if (dubbing.length === 0 && diarization.length === 0 && voiceCloning.length === 0) {
-    dubbing.push("baseline");
+    dubbing.push("aligned");
   }
 
   // Build axes: only include categories with selections
