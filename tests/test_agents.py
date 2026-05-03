@@ -8,9 +8,23 @@ from foreign_whispers.reranking import (
 
 
 def test_get_shorter_returns_empty_stub():
-    """Stub returns [] until students implement it."""
-    result = get_shorter_translations("hello", "hola", 1.0)
-    assert result == []
+    """Long segments should produce shorter candidates, shortest first."""
+    result = get_shorter_translations(
+        "Right now we have to do it this way.",
+        "En este momento tenemos que hacerlo de esta manera.",
+        2.0,
+    )
+    assert result
+    assert isinstance(result[0], TranslationCandidate)
+    assert result == sorted(result, key=lambda candidate: candidate.char_count)
+    assert result[0].char_count < len("En este momento tenemos que hacerlo de esta manera.")
+    assert any("ahora" in candidate.text for candidate in result)
+
+
+def test_get_shorter_keeps_fitting_baseline_available():
+    result = get_shorter_translations("hello", "hola", 2.0)
+    assert result
+    assert any(candidate.text == "hola" for candidate in result)
 
 
 def test_analyze_failures_returns_dataclass():

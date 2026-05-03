@@ -51,3 +51,76 @@ def clip_evaluation_report(
         "n_translation_retries":     n_retry,
         "total_cumulative_drift_s":  round(drift, 3),
     }
+
+
+def dubbing_scorecard(
+    metrics: list[SegmentMetrics],
+    aligned: list[AlignedSegment],
+    align_report: dict | None = None,
+) -> dict:
+    """Summarize clip quality across multiple normalized dimensions.
+
+    The scorecard is intentionally heuristic and dependency-free so it can run
+    during notebook iteration and tests without extra models.
+    """
+    if not metrics:
+        return {
+            "timing_accuracy": 0.0,
+            "intelligibility": 0.0,
+            "semantic_fidelity": 0.0,
+            "naturalness": 0.0,
+            "overall": 0.0,
+        }
+
+    report = align_report or clip_evaluation_report(metrics, aligned)
+    n_segments = max(len(metrics), 1)
+    failed_or_retried = sum(
+        1 for segment in aligned
+        if segment.action in {AlignAction.REQUEST_SHORTER, AlignAction.FAIL}
+    )
+
+    mean_err = float(report.get("mean_abs_duration_error_s", 0.0))
+    severe_pct = float(report.get("pct_severe_stretch", 0.0))
+    drift = abs(float(report.get("total_cumulative_drift_s", 0.0)))
+
+    timing_accuracy = max(
+        0.0,
+        1.0 - min(1.0, (mean_err / 1.5) * 0.5 + (severe_pct / 100.0) * 0.3 + (drift / 5.0) * 0.2),
+    )
+
+    intelligibility = max(
+        0.0,
+        1.0 - min(1.0, (severe_pct / 100.0) * 0.6 + (failed_or_retried / n_segments) * 0.4),
+    )
+
+    semantic_fidelity = max(
+        0.0,
+        1.0 - min(1.0, failed_or_retried / n_segments),
+    )
+
+    speed_values = []
+    if isinstance(align_report, dict):
+        for segment in align_report.get("segments", []):
+            speed = segment.get("speed_factor")
+            if isinstance(speed, (int, float)):
+                speed_values.append(float(speed))
+    if not speed_values:
+        speed_values = [segment.stretch_factor for segment in aligned]
+
+    if len(speed_values) > 1:
+        speed_variance = _stats.pvariance(speed_values)
+    else:
+        speed_variance = 0.0
+    naturalness = max(0.0, 1.0 - min(1.0, speed_variance / 0.25))
+
+    overall = round(
+        (timing_accuracy + intelligibility + semantic_fidelity + naturalness) / 4.0,
+        3,
+    )
+    return {
+        "timing_accuracy": round(timing_accuracy, 3),
+        "intelligibility": round(intelligibility, 3),
+        "semantic_fidelity": round(semantic_fidelity, 3),
+        "naturalness": round(naturalness, 3),
+        "overall": overall,
+    }

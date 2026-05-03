@@ -28,6 +28,19 @@ def resolve_speaker_wav(
     Returns:
         Relative path string for the Chatterbox container (e.g. "es/default.wav").
     """
-    # ---- YOUR CODE HERE ----
-    raise NotImplementedError("Implement this function")
-    # ---- END YOUR CODE ----
+    lang = target_language.strip().lower()
+
+    candidates: list[tuple[Path, str]] = []
+    if speaker_id:
+        candidates.append(
+            (speakers_dir / lang / f"{speaker_id}.wav", f"{lang}/{speaker_id}.wav")
+        )
+    candidates.append((speakers_dir / lang / "default.wav", f"{lang}/default.wav"))
+    candidates.append((speakers_dir / "default.wav", "default.wav"))
+
+    for abs_path, rel_path in candidates:
+        if abs_path.exists():
+            return rel_path
+
+    # Final fallback keeps the interface stable even if the file is added later.
+    return "default.wav"

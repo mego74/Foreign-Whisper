@@ -207,6 +207,33 @@ uv sync                    # install all dependencies
 uv run python -c "from foreign_whispers import FWClient; print('ok')"
 ```
 
+### Local macOS CPU workflow
+
+If Docker or GPU containers are unavailable, you can still run the full stack
+locally on macOS for notebook work and end-to-end validation:
+
+```bash
+# install Python deps
+env UV_CACHE_DIR=/private/tmp/uv-cache uv sync
+
+# start the API on port 8080
+env UV_CACHE_DIR=/private/tmp/uv-cache uv run uvicorn api.src.main:app --host 127.0.0.1 --port 8080
+
+# in a second terminal, start the frontend on port 8501
+cd frontend
+pnpm install
+pnpm dev
+```
+
+Notes:
+- The local API keeps the same REST surface as the containerized version, so
+  the notebooks and `FWClient()` still target `http://localhost:8080`.
+- If GPU-backed TTS engines are unavailable, the runtime falls back to local
+  CPU-safe synthesis paths so the pipeline can still complete on macOS for
+  development and testing.
+- Outputs are still cached under `pipeline_data/api/`, so re-running the same
+  stages will reuse prior artifacts.
+
 For Jupyter/VS Code notebooks, register the kernel once:
 
 ```bash

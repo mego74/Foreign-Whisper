@@ -7,6 +7,7 @@ SegmentMetrics.  The translation re-ranking function is a **student assignment**
 
 import dataclasses
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -157,10 +158,117 @@ def get_shorter_translations(
     Returns:
         Empty list (stub).  Implement to return ``TranslationCandidate`` items.
     """
-    logger.info(
-        "get_shorter_translations called for %.1fs budget (%d chars baseline) — "
-        "returning empty list (student assignment stub).",
-        target_duration_s,
-        len(baseline_es),
+    budget_chars = max(int(target_duration_s * 15), 1)
+    baseline = " ".join(baseline_es.split())
+
+    def _clean(text: str) -> str:
+        text = re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+        return text
+
+    def _add_candidate(
+        seen: dict[str, TranslationCandidate],
+        text: str,
+        rationale: str,
+    ) -> None:
+        cleaned = _clean(text)
+        if not cleaned or cleaned in seen:
+            return
+        if cleaned == baseline and len(cleaned) > budget_chars:
+            return
+        seen[cleaned] = TranslationCandidate(
+            text=cleaned,
+            char_count=len(cleaned),
+            brevity_rationale=rationale,
+        )
+
+    replacements = [
+        ("en este momento", "ahora"),
+        ("en este caso", "aqui"),
+        ("de esta manera", "asi"),
+        ("de la misma manera", "igual"),
+        ("debido a que", "porque"),
+        ("a pesar de que", "aunque"),
+        ("con el fin de", "para"),
+        ("para poder", "para"),
+        ("tiene que", "debe"),
+        ("tienen que", "deben"),
+        ("va a", "va"),
+        ("voy a", "voy"),
+        ("vamos a", "vamos"),
+        ("estoy yendo a", "voy a"),
+        ("no se puede", "imposible"),
+    ]
+    optional_words = {
+        "bueno",
+        "pues",
+        "entonces",
+        "realmente",
+        "simplemente",
+        "bastante",
+        "solo",
+        "solamente",
+        "ya",
+    }
+
+    candidates: dict[str, TranslationCandidate] = {}
+
+    if len(baseline) <= budget_chars:
+        _add_candidate(candidates, baseline, "baseline already fits the budget")
+
+    compact = baseline.lower()
+    for old, new in replacements:
+        compact = compact.replace(old, new)
+    _add_candidate(candidates, compact, "replaced verbose phrases with shorter equivalents")
+
+    compact_words = [word for word in compact.split() if word not in optional_words]
+    _add_candidate(
+        candidates,
+        " ".join(compact_words),
+        "removed optional filler words",
     )
-    return []
+
+    no_parentheticals = re.sub(r"\([^)]*\)", "", compact)
+    _add_candidate(
+        candidates,
+        no_parentheticals,
+        "removed parenthetical detail",
+    )
+
+    if "," in compact:
+        first_clause = compact.split(",", 1)[0]
+        if len(_clean(first_clause)) >= max(8, budget_chars // 2):
+            _add_candidate(
+                candidates,
+                first_clause,
+                "kept the leading clause to preserve the main idea",
+            )
+
+    trimmed_words: list[str] = []
+    for word in compact_words:
+        proposal = " ".join([*trimmed_words, word]).strip()
+        if len(proposal) > budget_chars and trimmed_words:
+            break
+        trimmed_words.append(word)
+    if trimmed_words:
+        _add_candidate(
+            candidates,
+            " ".join(trimmed_words),
+            "trimmed to the time budget",
+        )
+
+    shorter_candidates = [
+        candidate
+        for candidate in candidates.values()
+        if candidate.char_count <= budget_chars or candidate.char_count < len(baseline)
+    ]
+    shorter_candidates.sort(key=lambda candidate: (candidate.char_count, candidate.text))
+
+    logger.info(
+        "get_shorter_translations produced %d candidate(s) for %.1fs budget (%d -> %d chars target).",
+        len(shorter_candidates),
+        target_duration_s,
+        len(baseline),
+        budget_chars,
+    )
+    return shorter_candidates

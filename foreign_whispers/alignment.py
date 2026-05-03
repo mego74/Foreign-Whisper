@@ -298,3 +298,113 @@ def global_align(
         cumulative_drift += gap_shift
 
     return aligned
+
+
+def global_align_dp(
+    metrics: list[SegmentMetrics],
+    silence_regions: list[dict],
+    max_stretch: float = 1.4,
+    beam_width: int = 8,
+) -> list[AlignedSegment]:
+    """Beam-search alignment that trades a little stretch for less drift.
+
+    Unlike ``global_align()``, this planner can explore multiple choices for a
+    segment and keep the best few partial schedules. The main trade-off it
+    handles is whether to spend silence as drift (``GAP_SHIFT``) or accept a
+    slightly stronger stretch when that avoids pushing the rest of the clip.
+    """
+
+    def _silence_after(end_s: float) -> float:
+        for region in silence_regions:
+            if region.get("label") == "silence" and region["start_s"] >= end_s - 0.1:
+                return region["end_s"] - region["start_s"]
+        return 0.0
+
+    def _options(m: SegmentMetrics, available_gap_s: float) -> list[tuple[AlignAction, float, float, float]]:
+        opts: list[tuple[AlignAction, float, float, float]] = []
+        stretch_cap = max(max_stretch, 1.6)
+
+        if m.predicted_stretch <= 1.1:
+            opts.append((AlignAction.ACCEPT, 0.0, 1.0, 0.0))
+
+        if m.predicted_stretch <= stretch_cap:
+            stretch_penalty = max(0.0, m.predicted_stretch - 1.0) ** 2 * 8.0
+            if m.predicted_stretch > max_stretch:
+                stretch_penalty += 0.75 + (m.predicted_stretch - max_stretch) * 4.0
+            opts.append((
+                AlignAction.MILD_STRETCH,
+                0.0,
+                min(m.predicted_stretch, stretch_cap),
+                stretch_penalty,
+            ))
+
+        if m.predicted_stretch <= 1.8 and available_gap_s >= m.overflow_s:
+            drift_penalty = 0.5 + (m.overflow_s * 4.0)
+            opts.append((AlignAction.GAP_SHIFT, m.overflow_s, 1.0, drift_penalty))
+
+        if m.predicted_stretch <= 2.5:
+            opts.append((
+                AlignAction.REQUEST_SHORTER,
+                0.0,
+                1.0,
+                4.0 + (m.overflow_s * 5.0),
+            ))
+        else:
+            opts.append((
+                AlignAction.FAIL,
+                0.0,
+                1.0,
+                12.0 + (m.overflow_s * 10.0),
+            ))
+
+        deduped: list[tuple[AlignAction, float, float, float]] = []
+        seen: set[tuple[AlignAction, float, float]] = set()
+        for action, gap_shift, stretch, penalty in opts:
+            key = (action, round(gap_shift, 4), round(stretch, 4))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append((action, gap_shift, stretch, penalty))
+        return deduped
+
+    states: list[tuple[float, float, list[AlignedSegment]]] = [(0.0, 0.0, [])]
+
+    for metric in metrics:
+        next_states: list[tuple[float, float, list[AlignedSegment]]] = []
+        available_gap_s = _silence_after(metric.source_end)
+
+        for score, cumulative_drift, scheduled in states:
+            previous_end = scheduled[-1].scheduled_end if scheduled else 0.0
+
+            for action, gap_shift, stretch_factor, penalty in _options(metric, available_gap_s):
+                scheduled_start = metric.source_start + cumulative_drift
+                scheduled_end = scheduled_start + metric.source_duration_s + gap_shift
+                overlap_s = max(0.0, previous_end - scheduled_start)
+                next_drift = cumulative_drift + gap_shift
+                next_score = score + penalty + (next_drift * 1.5) + (overlap_s * 50.0)
+
+                next_states.append((
+                    next_score,
+                    next_drift,
+                    [
+                        *scheduled,
+                        AlignedSegment(
+                            index=metric.index,
+                            original_start=metric.source_start,
+                            original_end=metric.source_end,
+                            scheduled_start=scheduled_start,
+                            scheduled_end=scheduled_end,
+                            text=metric.translated_text,
+                            action=action,
+                            gap_shift_s=gap_shift,
+                            stretch_factor=stretch_factor,
+                        ),
+                    ],
+                ))
+
+        next_states.sort(key=lambda item: (item[0], item[1]))
+        states = next_states[: max(1, beam_width)]
+
+    if not states:
+        return []
+    return min(states, key=lambda item: (item[0], item[1]))[2]

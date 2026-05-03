@@ -4,6 +4,8 @@ import os
 import pathlib
 import json
 import glob
+import shutil
+import subprocess
 import tempfile
 
 import requests
@@ -29,6 +31,29 @@ SPEED_MAX = 1.25
 _STRETCH_SKIP_RATIO = 0.5
 _SPEED_MIN_LEGACY = 0.1
 _SPEED_MAX_LEGACY = 10.0
+
+
+class SyncedSegmentAudio(AudioSegment):
+    """AudioSegment with unpackable timing metadata for backwards compatibility."""
+
+    speed_factor: float
+    raw_duration_s: float
+
+    def __iter__(self):
+        yield self
+        yield self.speed_factor
+        yield self.raw_duration_s
+
+
+def _attach_sync_metadata(
+    segment_audio: AudioSegment,
+    speed_factor: float,
+    raw_duration_s: float,
+) -> SyncedSegmentAudio:
+    segment_audio.__class__ = SyncedSegmentAudio
+    segment_audio.speed_factor = speed_factor
+    segment_audio.raw_duration_s = raw_duration_s
+    return segment_audio
 
 
 class ChatterboxClient:
@@ -125,6 +150,37 @@ class ChatterboxClient:
         return chunks if chunks else [text]
 
 
+class MacSayClient:
+    """Local macOS TTS fallback using the built-in `say` command."""
+
+    def __init__(self, voice: str | None = None):
+        self.voice = voice or os.getenv("FW_SAY_VOICE", "Monica")
+
+    def tts_to_file(self, text: str, file_path: str, **kwargs) -> None:
+        if not text or not text.strip():
+            AudioSegment.silent(duration=250).export(file_path, format="wav")
+            return
+
+        with tempfile.NamedTemporaryFile(suffix=".aiff", delete=False) as tmp:
+            tmp_path = pathlib.Path(tmp.name)
+
+        try:
+            cmd = ["say", "-v", self.voice, "-o", str(tmp_path), text]
+            subprocess.run(cmd, check=True, capture_output=True)
+            audio, sr = sf.read(str(tmp_path))
+            sf.write(file_path, audio, sr)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+
+class SilentTTSEngine:
+    """Last-resort fallback that writes silence instead of crashing."""
+
+    def tts_to_file(self, text: str, file_path: str, **kwargs) -> None:
+        duration_ms = max(300, int(max(len(text.strip()), 1) / 12.0 * 1000))
+        AudioSegment.silent(duration=duration_ms).export(file_path, format="wav")
+
+
 def _make_tts_engine():
     """Create TTS engine: Chatterbox API client if server is reachable, else local Coqui.
 
@@ -141,31 +197,56 @@ def _make_tts_engine():
         print(f"[tts] Chatterbox not available ({exc}), falling back to local Coqui")
 
     # Fallback: local Coqui TTS (for dev/test without Docker)
-    import functools
-    import torch
-    from TTS.api import TTS as CoquiTTS
-    # Coqui TTS checkpoints contain classes (RAdam, defaultdict, etc.) that
-    # PyTorch 2.6+ rejects with weights_only=True.  Monkey-patch torch.load
-    # to default to weights_only=False for these trusted model files.
-    _original_torch_load = torch.load
-    @functools.wraps(_original_torch_load)
-    def _patched_load(*args, **kwargs):
-        kwargs.setdefault("weights_only", False)
-        return _original_torch_load(*args, **kwargs)
-    torch.load = _patched_load
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[tts] Using local Coqui TTS on {device}")
-    return CoquiTTS(model_name="tts_models/es/mai/tacotron2-DDC", progress_bar=False).to(device)
+    try:
+        import functools
+        import torch
+        from TTS.api import TTS as CoquiTTS
+
+        cache_root = (
+            pathlib.Path(__file__).resolve().parent.parent.parent.parent
+            / "pipeline_data"
+            / ".cache"
+            / "tts"
+        )
+        cache_root.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("TTS_HOME", str(cache_root))
+        os.environ.setdefault("XDG_DATA_HOME", str(cache_root.parent))
+
+        # Coqui TTS checkpoints contain classes (RAdam, defaultdict, etc.) that
+        # PyTorch 2.6+ rejects with weights_only=True. Monkey-patch torch.load
+        # to default to weights_only=False for these trusted model files.
+        _original_torch_load = torch.load
+
+        @functools.wraps(_original_torch_load)
+        def _patched_load(*args, **kwargs):
+            kwargs.setdefault("weights_only", False)
+            return _original_torch_load(*args, **kwargs)
+
+        torch.load = _patched_load
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"[tts] Using local Coqui TTS on {device}")
+        return CoquiTTS(model_name="tts_models/es/mai/tacotron2-DDC", progress_bar=False).to(device)
+    except Exception as exc:
+        print(f"[tts] Coqui not available ({exc}), falling back to macOS say")
+
+    if shutil.which("say"):
+        print("[tts] Using macOS say fallback")
+        return MacSayClient()
+
+    print("[tts] No local TTS backend available, using silent fallback")
+    return SilentTTSEngine()
 
 
 _tts_engine = None
+tts = None
 
 
 def _get_tts_engine():
     """Lazy singleton — resolved on first call, not at import time."""
-    global _tts_engine
+    global _tts_engine, tts
     if _tts_engine is None:
         _tts_engine = _make_tts_engine()
+        tts = _tts_engine
     return _tts_engine
 
 
@@ -196,16 +277,33 @@ def files_from_dir(dir_path) -> list:
     return es_files
 
 
-def _synthesize_raw(tts_engine, text: str, wav_path: str) -> bytes | None:
+def _synthesize_raw(
+    tts_engine,
+    text: str,
+    wav_path: str,
+    *,
+    speaker_wav: str | None = None,
+) -> bytes | None:
     """GPU-bound: call TTS engine and return raw WAV bytes, or None on failure."""
-    if not text or not text.strip():
+    if tts_engine is None or not text or not text.strip():
         return None
     try:
-        tts_engine.tts_to_file(text=text, file_path=wav_path)
+        kwargs = {}
+        if speaker_wav is not None:
+            kwargs["speaker_wav"] = speaker_wav
+        tts_engine.tts_to_file(text=text, file_path=wav_path, **kwargs)
         return pathlib.Path(wav_path).read_bytes()
     except Exception as exc:
         print(f"[tts] TTS failed for segment ({exc}), using silence")
         return None
+
+
+def _time_stretch_audio(y, sr: int, speed_factor: float):
+    """Stretch audio with rubberband when available, otherwise librosa."""
+    try:
+        return pyrubberband.time_stretch(y, sr, speed_factor)
+    except (FileNotFoundError, OSError, RuntimeError, subprocess.CalledProcessError):
+        return librosa.effects.time_stretch(y, rate=speed_factor)
 
 
 def _postprocess_segment(raw_wav_bytes: bytes | None, target_sec: float,
@@ -248,7 +346,7 @@ def _postprocess_segment(raw_wav_bytes: bytes | None, target_sec: float,
         speed_factor = max(SPEED_MIN, min(SPEED_MAX, speed_factor))
 
     if abs(speed_factor - 1.0) > 0.01:
-        y_stretched = pyrubberband.time_stretch(y, sr, speed_factor)
+        y_stretched = _time_stretch_audio(y, sr, speed_factor)
     else:
         y_stretched = y
 
@@ -265,16 +363,35 @@ def _postprocess_segment(raw_wav_bytes: bytes | None, target_sec: float,
     return (segment_audio, speed_factor, raw_duration)
 
 
-def _synced_segment_audio(tts_engine, text: str, target_sec: float, work_dir, stretch_factor: float = 1.0, alignment_enabled: bool = True) -> tuple:
+def _synced_segment_audio(
+    tts_engine,
+    text: str,
+    target_sec: float,
+    work_dir,
+    stretch_factor: float = 1.0,
+    alignment_enabled: bool | None = None,
+    speaker_wav: str | None = None,
+):
     """Generate TTS audio for *text* and time-stretch it to *target_sec*.
 
     Convenience wrapper kept for callers that don't use the batch path.
     """
     if target_sec <= 0:
-        return (None, 0.0, 0.0)
+        return None
+    if alignment_enabled is None:
+        alignment_enabled = _ALIGNMENT_ENABLED
     raw_wav = str(pathlib.Path(work_dir) / "raw_segment.wav")
-    raw_bytes = _synthesize_raw(tts_engine, text, raw_wav)
-    return _postprocess_segment(raw_bytes, target_sec, stretch_factor, alignment_enabled, str(work_dir))
+    raw_bytes = _synthesize_raw(tts_engine, text, raw_wav, speaker_wav=speaker_wav)
+    segment_audio, speed_factor, raw_duration = _postprocess_segment(
+        raw_bytes,
+        target_sec,
+        stretch_factor,
+        alignment_enabled,
+        str(work_dir),
+    )
+    if segment_audio is None:
+        return None
+    return _attach_sync_metadata(segment_audio, speed_factor, raw_duration)
 
 
 def text_to_speech(text, output_file_path):
@@ -343,6 +460,8 @@ def _write_align_report(
     metrics: list,
     aligned: list,
     segment_details: list,
+    *,
+    alignment_enabled: bool,
 ) -> None:
     """Write a {stem}.align.json sidecar with evaluation metrics and per-segment detail.
 
@@ -362,7 +481,7 @@ def _write_align_report(
             "total_cumulative_drift_s": 0.0,
         }
 
-    report = {**summary, "alignment_enabled": _ALIGNMENT_ENABLED, "segments": segment_details}
+    report = {**summary, "alignment_enabled": alignment_enabled, "segments": segment_details}
     sidecar_path = pathlib.Path(output_path) / f"{stem}.align.json"
     sidecar_path.write_text(json.dumps(report, indent=2))
 
@@ -395,7 +514,15 @@ def _compute_speech_offset(source_path: str) -> float:
     return yt_start - whisper_start
 
 
-def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=None):
+def text_file_to_speech(
+    source_path,
+    output_path,
+    tts_engine=None,
+    *,
+    alignment=None,
+    speaker_wav: str | None = None,
+    voice_map: dict[str, str] | None = None,
+):
     """Read translated JSON with segment timestamps and produce a time-aligned WAV.
 
     Each segment is individually synthesized and time-stretched to match its
@@ -420,7 +547,7 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
     if not segments:
         text = text_from_file(source_path)
         save_path = pathlib.Path(output_path) / pathlib.Path(save_name)
-        text_to_speech(text, str(save_path))
+        engine.tts_to_file(text=text, file_path=str(save_path), speaker_wav=speaker_wav)
         print("success!")
         return None
 
@@ -464,33 +591,16 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
             "target_sec": target_sec,
             "stretch_factor": stretch_factor,
             "aligned_seg": aligned_seg,
+            "speaker": seg.get("speaker"),
+            "speaker_wav": (
+                voice_map.get(seg.get("speaker"), speaker_wav)
+                if voice_map and seg.get("speaker") is not None
+                else speaker_wav
+            ),
         })
-
-    # ── Phase 1: GPU synthesis (concurrent) ───────────────────────────
-    # Submit all TTS calls to a thread pool so the GPU stays busy while
-    # previous results are being downloaded / decoded.
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    _TTS_WORKERS = int(os.getenv("FW_TTS_WORKERS", "3"))
-
-    raw_wav_map: dict[int, bytes | None] = {}
-
-    with tempfile.TemporaryDirectory() as synth_dir:
-        def _do_synth(idx: int, text: str) -> tuple[int, bytes | None]:
-            wav_path = str(pathlib.Path(synth_dir) / f"seg_{idx}.wav")
-            return idx, _synthesize_raw(engine, text, wav_path)
-
-        with ThreadPoolExecutor(max_workers=_TTS_WORKERS) as pool:
-            futures = {
-                pool.submit(_do_synth, m["index"], m["text"]): m["index"]
-                for m in seg_metas
-            }
-            for fut in as_completed(futures):
-                idx, raw_bytes = fut.result()
-                raw_wav_map[idx] = raw_bytes
 
     print(f" ({len(segments)} segments synthesized)", end="")
 
-    # ── Phase 2: CPU post-processing (sequential assembly) ────────────
     with tempfile.TemporaryDirectory() as tmpdir:
         combined = AudioSegment.empty()
         cursor_ms = 0
@@ -504,15 +614,36 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
                 combined += AudioSegment.silent(duration=start_ms - cursor_ms)
                 cursor_ms = start_ms
 
-            seg_audio, seg_speed_factor, seg_raw_duration = _postprocess_segment(
-                raw_wav_map[i], m["target_sec"], m["stretch_factor"],
-                use_alignment, tmpdir,
-            )
+            if use_alignment and m["speaker_wav"] is None:
+                synced = _synced_segment_audio(
+                    engine,
+                    m["text"],
+                    m["target_sec"],
+                    tmpdir,
+                    m["stretch_factor"],
+                )
+            else:
+                synced = _synced_segment_audio(
+                    engine,
+                    m["text"],
+                    m["target_sec"],
+                    tmpdir,
+                    stretch_factor=m["stretch_factor"],
+                    alignment_enabled=use_alignment,
+                    speaker_wav=m["speaker_wav"],
+                )
+            if synced is None:
+                seg_audio = None
+                seg_speed_factor = 0.0
+                seg_raw_duration = 0.0
+            else:
+                seg_audio, seg_speed_factor, seg_raw_duration = synced
 
             aligned_seg = m["aligned_seg"]
             segment_details.append({
                 "index": i,
                 "text": m["text"],
+                "speaker": m["speaker"],
                 "target_sec": round(m["target_sec"], 3),
                 "stretch_factor": round(m["stretch_factor"], 3),
                 "raw_duration_s": round(seg_raw_duration, 3),
@@ -528,7 +659,14 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
         combined.export(str(save_path), format="wav")
 
     stem = pathlib.Path(source_path).stem
-    _write_align_report(str(output_path), stem, _metrics_list, _aligned_list, segment_details)
+    _write_align_report(
+        str(output_path),
+        stem,
+        _metrics_list,
+        _aligned_list,
+        segment_details,
+        alignment_enabled=use_alignment,
+    )
 
     print("success!")
     return None

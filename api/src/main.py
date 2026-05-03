@@ -2,6 +2,7 @@
 
 import logging
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,8 +19,8 @@ async def lifespan(app: FastAPI):
     This avoids blocking startup in Docker Compose where Whisper and TTS
     inference may be handled by separate containers (speaches, Chatterbox).
     """
-    app.state._whisper_model = None
-    app.state._tts_model = None
+    app.state.whisper_model = SimpleNamespace()
+    app.state.tts_model = SimpleNamespace()
     logger.info("Application ready (models will load on first use).")
 
     # Configure Logfire if a write token is available
@@ -38,31 +39,31 @@ async def lifespan(app: FastAPI):
     yield
 
     # Cleanup
-    if app.state._whisper_model is not None:
-        del app.state._whisper_model
-    if app.state._tts_model is not None:
-        del app.state._tts_model
+    if hasattr(app.state, "whisper_model"):
+        del app.state.whisper_model
+    if hasattr(app.state, "tts_model"):
+        del app.state.tts_model
     logger.info("Models unloaded.")
 
 
 def get_whisper_model(app):
     """Lazy-load Whisper model on first use."""
-    if app.state._whisper_model is None:
+    if app.state.whisper_model is None or not hasattr(app.state.whisper_model, "transcribe"):
         logger.info("Loading Whisper model (%s)...", settings.whisper_model)
         import whisper
-        app.state._whisper_model = whisper.load_model(settings.whisper_model)
+        app.state.whisper_model = whisper.load_model(settings.whisper_model)
         logger.info("Whisper model loaded.")
-    return app.state._whisper_model
+    return app.state.whisper_model
 
 
 def get_tts_model(app):
     """Lazy-load TTS model on first use."""
-    if app.state._tts_model is None:
+    if app.state.tts_model is None or not hasattr(app.state.tts_model, "tts_to_file"):
         logger.info("Loading TTS model (%s)...", settings.tts_model_name)
         from TTS.api import TTS
-        app.state._tts_model = TTS(model_name=settings.tts_model_name, progress_bar=False)
+        app.state.tts_model = TTS(model_name=settings.tts_model_name, progress_bar=False)
         logger.info("TTS model loaded.")
-    return app.state._tts_model
+    return app.state.tts_model
 
 
 def create_app() -> FastAPI:

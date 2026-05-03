@@ -31,7 +31,7 @@ def test_sidecar_json_written(tmp_path):
     out_dir = tmp_path / "out"
     out_dir.mkdir()
 
-    def fake_synced(engine, text, target_sec, work_dir, stretch_factor=1.0):
+    def fake_synced(engine, text, target_sec, work_dir, stretch_factor=1.0, **kwargs):
         from pydub import AudioSegment
         return (AudioSegment.silent(duration=int(target_sec * 1000)), 1.0, target_sec)
 
@@ -55,7 +55,7 @@ def test_sidecar_segments_contain_speed_factor(tmp_path):
     out_dir = tmp_path / "out"
     out_dir.mkdir()
 
-    def fake_synced(engine, text, target_sec, work_dir, stretch_factor=1.0):
+    def fake_synced(engine, text, target_sec, work_dir, stretch_factor=1.0, **kwargs):
         from pydub import AudioSegment
         return (AudioSegment.silent(duration=int(target_sec * 1000)), 1.0, target_sec)
 
@@ -68,6 +68,25 @@ def test_sidecar_segments_contain_speed_factor(tmp_path):
     assert "speed_factor" in seg0
     assert "raw_duration_s" in seg0
     assert "action" in seg0
+
+
+def test_sidecar_records_requested_alignment_mode(tmp_path):
+    from api.src.services.tts_engine import text_file_to_speech
+
+    es_path = _write_minimal_transcripts(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    def fake_synced(engine, text, target_sec, work_dir, stretch_factor=1.0, **kwargs):
+        from pydub import AudioSegment
+        return (AudioSegment.silent(duration=int(target_sec * 1000)), 1.0, target_sec)
+
+    engine = MagicMock()
+    with patch("api.src.services.tts_engine._synced_segment_audio", side_effect=fake_synced):
+        text_file_to_speech(str(es_path), str(out_dir), tts_engine=engine, alignment=False)
+
+    report = json.loads((out_dir / "vid.align.json").read_text())
+    assert report["alignment_enabled"] is False
 
 
 def test_fw_alignment_off_uses_unclamped_range(tmp_path, monkeypatch):
