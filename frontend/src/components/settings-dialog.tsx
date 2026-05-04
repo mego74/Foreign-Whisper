@@ -145,6 +145,7 @@ const VOICE_CLONING_METHODS = [
 
 function TTSSettings() {
   const { settings, toggleSetting } = useStudioSettingsContext();
+  const diarizationLocked = settings.voiceCloning.length > 0;
   return (
     <div className="space-y-8">
       <div className="flex items-center justify-between">
@@ -159,7 +160,9 @@ function TTSSettings() {
 
       <div className="space-y-3">
         <p className="text-sm font-medium">Diarization</p>
-        <p className="text-xs text-muted-foreground">Speaker detection method for multi-speaker videos.</p>
+        <p className="text-xs text-muted-foreground">
+          Speaker detection method for multi-speaker videos. This is automatically required when voice cloning is enabled.
+        </p>
         {DIARIZATION_METHODS.map((m) => (
           <button
             type="button"
@@ -176,6 +179,11 @@ function TTSSettings() {
             <div>
               <div className="text-sm font-medium">{m.label}</div>
               <div className="text-xs text-muted-foreground">{m.description}</div>
+              {diarizationLocked && settings.diarization.includes(m.value) ? (
+                <div className="text-[11px] text-muted-foreground mt-1">
+                  Locked on because speaker-aware voice cloning is enabled.
+                </div>
+              ) : null}
             </div>
           </button>
         ))}
@@ -185,7 +193,9 @@ function TTSSettings() {
 
       <div className="space-y-3">
         <p className="text-sm font-medium">Voice Cloning</p>
-        <p className="text-xs text-muted-foreground">Method for cloning the source speaker's voice.</p>
+        <p className="text-xs text-muted-foreground">
+          Method for cloning the source speaker&apos;s voice. Turning this on auto-enables diarization so male and female speakers can use different references.
+        </p>
         {VOICE_CLONING_METHODS.map((m) => (
           <button
             type="button"

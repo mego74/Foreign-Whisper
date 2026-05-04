@@ -3,6 +3,7 @@
 import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
 import type { StudioSettings } from "@/lib/types";
 import { DEFAULT_STUDIO_SETTINGS } from "@/lib/types";
+import { requiresDiarization } from "@/lib/settings";
 
 type ArraySettingKey = {
   [K in keyof StudioSettings]: StudioSettings[K] extends string[] ? K : never;
@@ -29,12 +30,29 @@ export function StudioSettingsProvider({ children }: { children: ReactNode }) {
       const current = prev[group];
       if (SINGLE_SELECT.has(group)) {
         const next = current.includes(value) ? [] : [value];
+        if (group === "voiceCloning") {
+          return {
+            ...prev,
+            voiceCloning: next,
+            diarization: next.length > 0 ? ["pyannote"] : prev.diarization,
+          };
+        }
+        if (group === "diarization") {
+          if (prev.voiceCloning.length > 0 && next.length === 0) {
+            return { ...prev, diarization: ["pyannote"] };
+          }
+          return { ...prev, diarization: next };
+        }
         return { ...prev, [group]: next };
       }
       const next = current.includes(value)
         ? current.filter((v) => v !== value)
         : [...current, value];
-      return { ...prev, [group]: next };
+      const updated = { ...prev, [group]: next };
+      if (requiresDiarization(updated) && updated.diarization.length === 0) {
+        return { ...updated, diarization: ["pyannote"] };
+      }
+      return updated;
     });
   }, []);
 

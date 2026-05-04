@@ -18,6 +18,7 @@ import {
   stitchVideo,
 } from "@/lib/api";
 import { computeConfigEntries, type ConfigEntry } from "@/lib/config-id";
+import { requiresDiarization } from "@/lib/settings";
 
 const STAGES: PipelineStage[] = [
   "download",
@@ -29,7 +30,7 @@ const STAGES: PipelineStage[] = [
 ];
 
 function initialStages(settings?: StudioSettings): Record<PipelineStage, StageState> {
-  const diarizationEnabled = (settings?.diarization.length ?? 0) > 0;
+  const diarizationEnabled = settings ? requiresDiarization(settings) : false;
   return Object.fromEntries(
     STAGES.map((s) => [
       s,
@@ -200,7 +201,7 @@ export function usePipeline() {
     try {
       const dl = await run("download", () => downloadVideo(video.url));
       await run("transcribe", () => transcribeVideo(dl.video_id, settings.useYoutubeCaptions));
-      if (settings.diarization.length > 0) {
+      if (requiresDiarization(settings)) {
         await run("diarize", () => diarizeVideo(dl.video_id));
       }
       await run("translate", () => translateVideo(dl.video_id, "es"));
