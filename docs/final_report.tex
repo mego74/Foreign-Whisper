@@ -8,7 +8,9 @@
 \usepackage{booktabs}
 \usepackage{enumitem}
 \usepackage{xcolor}
+\usepackage{tikz}
 \usepackage{longtable}
+\usetikzlibrary{arrows.meta,positioning}
 \hypersetup{
   colorlinks=true,
   linkcolor=blue,
@@ -57,6 +59,37 @@ also on timing stability across the entire pipeline.
 \section{System Architecture}
 The final system uses a layered architecture with a browser frontend, a FastAPI
 orchestrator, optional GPU inference services, and a reusable Python library.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=6pt, align=center, minimum width=2.6cm, minimum height=1.0cm, font=\small, inner sep=6pt},
+  arrow/.style={-{Latex[length=2.5mm]}, thick},
+  group/.style={draw, rounded corners=10pt, inner sep=10pt}
+]
+  \node[box, fill=blue!10, draw=blue!60] (frontend) {Next.js Studio\\Port 8501};
+  \node[box, fill=violet!10, draw=violet!60, right=2.2cm of frontend] (api) {FastAPI Backend\\Port 8080};
+  \node[box, fill=red!10, draw=red!60, right=2.0cm of api, yshift=1.1cm] (stt) {Whisper STT\\GPU or local fallback};
+  \node[box, fill=red!10, draw=red!60, right=2.0cm of api, yshift=-1.1cm] (tts) {Chatterbox TTS\\GPU or local fallback};
+  \node[box, fill=green!10, draw=green!60, below=1.6cm of api] (lib) {\texttt{foreign\_whispers}\\alignment, reranking, diarization, evaluation};
+  \node[box, fill=gray!10, draw=gray!60, below=1.6cm of frontend] (output) {Dubbed MP4 + VTT\\browser playback};
+  \node[box, fill=orange!10, draw=orange!60, below=1.6cm of stt] (cache) {\texttt{pipeline\_data/api}\\videos, transcripts, diarization, translations, TTS, outputs};
+
+  \draw[arrow] (frontend) -- node[above, font=\scriptsize] {/api/*} (api);
+  \draw[arrow] (api) -- node[above, font=\scriptsize] {transcribe} (stt);
+  \draw[arrow] (api) -- node[below, font=\scriptsize] {synthesize} (tts);
+  \draw[arrow] (api) -- node[right, font=\scriptsize] {uses} (lib);
+  \draw[arrow] (api) -- node[above left, font=\scriptsize] {serve video/captions} (output);
+  \draw[arrow] (api) -- node[right, font=\scriptsize] {cache artifacts} (cache);
+  \draw[arrow] (stt) -- node[right, font=\scriptsize] {segments} (cache);
+  \draw[arrow] (tts) -- node[right, font=\scriptsize] {WAV} (cache);
+\end{tikzpicture}
+\caption{High-level architecture of the Foreign Whispers pipeline. The browser
+frontend calls the FastAPI backend, which orchestrates the pipeline stages,
+delegates model-heavy work to inference backends, and caches all intermediate
+and final artifacts under \texttt{pipeline\_data/api/}.}
+\label{fig:architecture}
+\end{figure}
 
 \subsection{Major Components}
 \begin{itemize}[leftmargin=*]
