@@ -58,6 +58,147 @@ docker compose --profile cpu up -d
 
 Open **http://localhost:8501** in your browser.
 
+## Prerequisites
+
+- Python `3.11`
+- [`uv`](https://docs.astral.sh/uv/)
+- `ffmpeg`
+- Node.js `20+`
+- Optional NVIDIA GPU with Docker for the full intended Whisper + Chatterbox stack
+- Optional Hugging Face token for diarization:
+  - `FW_HF_TOKEN`
+  - you must accept the `pyannote/speaker-diarization-3.1` license on Hugging Face first
+
+Create a project-root `.env` file before running:
+
+```bash
+FW_HF_TOKEN=hf_your_token_here
+# optional
+LOGFIRE_TOKEN=your_logfire_token
+```
+
+## Recommended Run Paths
+
+### Option A: Docker + NVIDIA GPU
+
+This is the intended course setup.
+
+```bash
+git clone https://github.com/mego74/Foreign-Whisper.git
+cd Foreign-Whisper
+docker compose --profile nvidia up -d
+```
+
+Verify services:
+
+```bash
+curl http://127.0.0.1:8080/healthz
+open http://127.0.0.1:8501
+```
+
+### Option B: Local macOS CPU workflow
+
+This path is useful for development, notebook work, and local validation on a
+MacBook without GPU containers.
+
+```bash
+git clone https://github.com/mego74/Foreign-Whisper.git
+cd Foreign-Whisper
+env UV_CACHE_DIR=/private/tmp/uv-cache uv sync
+```
+
+Start the API:
+
+```bash
+env UV_CACHE_DIR=/private/tmp/uv-cache uv run uvicorn api.src.main:app --host 127.0.0.1 --port 8080
+```
+
+In a second terminal, start the frontend:
+
+```bash
+cd frontend
+pnpm install
+pnpm dev
+```
+
+Then open:
+
+- Frontend: `http://127.0.0.1:8501`
+- API health: `http://127.0.0.1:8080/healthz`
+
+Notes for the macOS workflow:
+
+- If Chatterbox is unavailable locally, the runtime falls back to CPU-safe TTS paths so the pipeline still completes.
+- Speaker-aware dubbing still works locally: diarized male/female speakers are routed to distinct fallback voices when the GPU Chatterbox service is unavailable.
+- All generated artifacts are cached under `pipeline_data/api/`.
+
+## How To Run The App
+
+1. Start the backend and frontend using either the Docker or local workflow above.
+2. Open `http://localhost:8501`.
+3. Choose one of the sample videos from the left sidebar.
+4. Open **Settings** and use:
+   - `Aligned` dubbing
+   - `pyannote` diarization
+   - `Chatterbox` voice cloning
+   - leave `Use YouTube Captions` off for better timing
+5. Click **Start Pipeline**.
+6. Wait for the stages to complete in this order:
+   - `Download`
+   - `Transcribe`
+   - `Diarize`
+   - `Translate`
+   - `TTS`
+   - `Stitch`
+7. Review the dubbed video in the built-in player.
+
+## Testing And Verification
+
+Run the backend test suite:
+
+```bash
+env UV_CACHE_DIR=/private/tmp/uv-cache uv run pytest -q
+```
+
+Run targeted frontend checks:
+
+```bash
+cd frontend
+npm run lint
+npm run build
+```
+
+Health checks:
+
+```bash
+curl http://127.0.0.1:8080/healthz
+```
+
+Expected healthy API response:
+
+```json
+{"status":"ok"}
+```
+
+## Output Artifacts
+
+Generated outputs are written to:
+
+- Source videos: `pipeline_data/api/videos/`
+- YouTube captions: `pipeline_data/api/youtube_captions/`
+- Whisper transcripts: `pipeline_data/api/transcriptions/whisper/`
+- Diarization results: `pipeline_data/api/diarizations/`
+- Translations: `pipeline_data/api/translations/argos/`
+- TTS audio: `pipeline_data/api/tts_audio/chatterbox/`
+- Dubbed captions: `pipeline_data/api/dubbed_captions/`
+- Final dubbed MP4s: `pipeline_data/api/dubbed_videos/`
+- Speaker reference WAVs: `pipeline_data/speakers/`
+
+Example final outputs from this repo are already cached under:
+
+- `pipeline_data/api/dubbed_videos/c-86ab861/`
+- `pipeline_data/api/dubbed_videos/c-fb1074a/`
+
 ## Pipeline Stages
 
 | Stage | What it does | Output |
