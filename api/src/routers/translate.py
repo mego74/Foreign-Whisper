@@ -14,6 +14,32 @@ router = APIRouter(prefix="/api")
 _translation_service = TranslationService(ui_dir=settings.data_dir)
 
 
+def _has_speaker_labels(segments: list[dict]) -> bool:
+    return any(segment.get("speaker") for segment in segments)
+
+
+def _translation_cache_is_fresh(src_path: pathlib.Path, out_path: pathlib.Path) -> bool:
+    """Cached translation is reusable only when it matches the source transcript state."""
+    if not out_path.exists():
+        return False
+
+    if not src_path.exists():
+        return True
+
+    if src_path.exists() and out_path.stat().st_mtime < src_path.stat().st_mtime:
+        return False
+
+    source = json.loads(src_path.read_text())
+    cached = json.loads(out_path.read_text())
+    source_has_speakers = _has_speaker_labels(source.get("segments", []))
+    cached_has_speakers = _has_speaker_labels(cached.get("segments", []))
+
+    if source_has_speakers and not cached_has_speakers:
+        return False
+
+    return True
+
+
 @router.post("/translate/{video_id}")
 async def translate_endpoint(
     video_id: str,
@@ -30,8 +56,10 @@ async def translate_endpoint(
 
     out_path = out_dir / f"{title}.json"
 
-    # Skip if already translated
-    if out_path.exists():
+    src_path = raw_dir / f"{title}.json"
+
+    # Skip only if the cached translation is still compatible with the source transcript.
+    if _translation_cache_is_fresh(src_path, out_path):
         data = json.loads(out_path.read_text())
         return {
             "video_id": video_id,
@@ -40,7 +68,6 @@ async def translate_endpoint(
             "segments": data.get("segments", []),
         }
 
-    src_path = raw_dir / f"{title}.json"
     transcript = json.loads(src_path.read_text())
 
     _translation_service.install_language_pack("en", target_language)

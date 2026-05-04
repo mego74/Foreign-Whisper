@@ -260,6 +260,30 @@ class TestTTSService:
 
         mock.assert_called_once_with("/src/transcript.json", "/out/audio", mock_engine)
 
+    def test_text_file_to_speech_passes_voice_kwargs(self, tmp_path):
+        from api.src.services.tts_service import TTSService
+
+        mock_engine = MagicMock()
+        svc = TTSService(ui_dir=tmp_path, tts_engine=mock_engine)
+
+        with patch("api.src.services.tts_service.tts_text_file_to_speech") as mock:
+            svc.text_file_to_speech(
+                "/src/transcript.json",
+                "/out/audio",
+                alignment=True,
+                speaker_wav="es/female.wav",
+                voice_map={"SPEAKER_00": "es/female.wav"},
+            )
+
+        mock.assert_called_once_with(
+            "/src/transcript.json",
+            "/out/audio",
+            mock_engine,
+            alignment=True,
+            speaker_wav="es/female.wav",
+            voice_map={"SPEAKER_00": "es/female.wav"},
+        )
+
     def test_title_for_video_id(self, tmp_path):
         from api.src.services.tts_service import TTSService
 

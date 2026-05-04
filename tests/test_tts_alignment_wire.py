@@ -117,6 +117,45 @@ def test_synthesize_raw_retries_with_cleaned_text(tmp_path):
     assert any(text == "Hola mundo?" for text in attempted_texts)
 
 
+def test_mac_say_client_picks_gendered_voice_from_speaker_wav():
+    """speaker_wav hints select distinct macOS voices for local fallback."""
+    from api.src.services.tts_engine import MacSayClient
+
+    assert (
+        MacSayClient._voice_for_speaker_wav("es/male.wav", "Monica")
+        == "Eddy (Spanish (Mexico))"
+    )
+    assert (
+        MacSayClient._voice_for_speaker_wav("es/female.wav", "Monica")
+        == "Flo (Spanish (Mexico))"
+    )
+    assert MacSayClient._voice_for_speaker_wav(None, "Monica") == "Monica"
+
+
+def test_synthesize_raw_prefers_say_for_speaker_aware_local_fallback(tmp_path, monkeypatch):
+    """Speaker-aware local fallback uses macOS say instead of single-speaker Coqui."""
+    from api.src.services.tts_engine import _synthesize_raw
+    from pydub import AudioSegment
+
+    out_path = tmp_path / "segment.wav"
+    engine = MagicMock()
+    monkeypatch.setattr("api.src.services.tts_engine.shutil.which", lambda _: "/usr/bin/say")
+
+    attempted = []
+
+    def fake_say(self, text, file_path, **kwargs):
+        attempted.append(kwargs.get("speaker_wav"))
+        AudioSegment.silent(duration=300).export(file_path, format="wav")
+
+    with patch("api.src.services.tts_engine.MacSayClient.tts_to_file", new=fake_say):
+        raw = _synthesize_raw(engine, "Hola mundo", str(out_path), speaker_wav="es/male.wav")
+
+    assert raw is not None
+    assert out_path.exists()
+    engine.tts_to_file.assert_not_called()
+    assert attempted == ["es/male.wav"]
+
+
 def test_text_file_to_speech_uses_aligned_schedule(tmp_path):
     """Aligned synthesis uses the scheduled timing window returned by _build_alignment."""
     from api.src.services.tts_engine import text_file_to_speech

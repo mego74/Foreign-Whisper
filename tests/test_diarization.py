@@ -1,6 +1,6 @@
 # tests/test_diarization.py
 import pytest
-from foreign_whispers.diarization import diarize_audio
+from foreign_whispers.diarization import assign_speakers, diarize_audio
 
 
 def test_returns_empty_without_token():
@@ -18,6 +18,54 @@ def test_returns_empty_when_pyannote_absent(monkeypatch):
     monkeypatch.setitem(sys.modules, "pyannote.audio", None)
     result = diarize_audio("/any/path.wav", hf_token="fake-token")
     assert result == []
+
+
+def test_assign_speakers_single_speaker():
+    segments = [
+        {"id": 0, "start": 0.0, "end": 3.0, "text": "Hello"},
+        {"id": 1, "start": 3.0, "end": 6.0, "text": "World"},
+    ]
+    diarization = [{"start_s": 0.0, "end_s": 7.0, "speaker": "SPEAKER_00"}]
+
+    result = assign_speakers(segments, diarization)
+
+    assert result[0]["speaker"] == "SPEAKER_00"
+    assert result[1]["speaker"] == "SPEAKER_00"
+
+
+def test_assign_speakers_multiple_speakers():
+    segments = [
+        {"id": 0, "start": 0.0, "end": 4.0, "text": "Speaker A talking"},
+        {"id": 1, "start": 5.0, "end": 9.0, "text": "Speaker B talking"},
+        {"id": 2, "start": 10.0, "end": 14.0, "text": "Speaker A again"},
+    ]
+    diarization = [
+        {"start_s": 0.0, "end_s": 4.5, "speaker": "SPEAKER_00"},
+        {"start_s": 4.5, "end_s": 9.5, "speaker": "SPEAKER_01"},
+        {"start_s": 9.5, "end_s": 15.0, "speaker": "SPEAKER_00"},
+    ]
+
+    result = assign_speakers(segments, diarization)
+
+    assert result[0]["speaker"] == "SPEAKER_00"
+    assert result[1]["speaker"] == "SPEAKER_01"
+    assert result[2]["speaker"] == "SPEAKER_00"
+
+
+def test_assign_speakers_defaults_when_empty():
+    segments = [{"id": 0, "start": 0.0, "end": 2.0, "text": "Hello"}]
+
+    result = assign_speakers(segments, [])
+
+    assert result[0]["speaker"] == "SPEAKER_00"
+
+
+def test_assign_speakers_does_not_mutate_inputs():
+    segments = [{"id": 0, "start": 0.0, "end": 2.0, "text": "Hello"}]
+
+    assign_speakers(segments, [])
+
+    assert "speaker" not in segments[0]
 
 
 @pytest.mark.requires_pyannote

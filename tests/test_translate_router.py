@@ -129,3 +129,38 @@ def test_translate_source_not_found(client, monkeypatch, ui_dir):
 
     resp = client.post("/api/translate/NONEXISTENT?target_language=es")
     assert resp.status_code == 404
+
+
+def test_translate_refreshes_cached_file_when_source_gains_speakers(client, monkeypatch, ui_dir):
+    """Cached translations without speaker labels must be refreshed after diarization."""
+    _patch_resolve_title(monkeypatch)
+
+    src = ui_dir / "transcriptions" / "whisper" / "Test Title.json"
+    transcript = _fake_transcript()
+    transcript["segments"][0]["speaker"] = "SPEAKER_01"
+    src.write_text(json.dumps(transcript))
+
+    cached = ui_dir / "translations" / "argos" / "Test Title.json"
+    cached.write_text(
+        json.dumps(
+            {
+                "text": "HOLA MUNDO",
+                "language": "es",
+                "segments": [{"id": 0, "start": 0.0, "end": 2.5, "text": " HOLA MUNDO"}],
+            }
+        )
+    )
+
+    monkeypatch.setattr(
+        "api.src.services.translation_service.translate_sentence",
+        lambda text, fc, tc: text.upper(),
+    )
+    monkeypatch.setattr(
+        "api.src.services.translation_service.download_and_install_package",
+        lambda fc, tc: None,
+    )
+
+    resp = client.post("/api/translate/G3Eup4mfJdA?target_language=es")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["segments"][0]["speaker"] == "SPEAKER_01"

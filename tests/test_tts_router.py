@@ -50,7 +50,7 @@ def test_tts_returns_audio_path(client, monkeypatch, ui_dir):
         lambda video_id: "Test Title",
     )
 
-    def fake_tts(source_path, output_path, tts_engine=None, alignment=False):
+    def fake_tts(source_path, output_path, tts_engine=None, alignment=False, **kwargs):
         wav = pathlib.Path(output_path) / "Test Title.wav"
         wav.write_bytes(b"RIFF" + b"\x00" * 100)
 
@@ -78,7 +78,7 @@ def test_tts_skips_if_cached(client, monkeypatch, ui_dir):
 
     tts_called = {"count": 0}
 
-    def tracking_tts(source_path, output_path, tts_engine=None, alignment=False):
+    def tracking_tts(source_path, output_path, tts_engine=None, alignment=False, **kwargs):
         tts_called["count"] += 1
 
     monkeypatch.setattr("api.src.services.tts_service.tts_text_file_to_speech", tracking_tts)
@@ -111,7 +111,7 @@ def test_tts_runs_in_threadpool(client, monkeypatch, ui_dir):
 
     executor_used = {"yes": False}
 
-    def fake_tts(source_path, output_path, tts_engine=None, alignment=False):
+    def fake_tts(source_path, output_path, tts_engine=None, alignment=False, **kwargs):
         wav = pathlib.Path(output_path) / "Test Title.wav"
         wav.write_bytes(b"RIFF" + b"\x00" * 100)
 
@@ -132,3 +132,95 @@ def test_tts_rejects_invalid_config(client, monkeypatch, ui_dir):
     """Config param must match ^c-[0-9a-f]{7}$ to prevent path traversal."""
     resp = client.post("/api/tts/G3Eup4mfJdA?config=../../etc")
     assert resp.status_code == 422
+
+
+def test_tts_builds_gender_aware_voice_map(client, monkeypatch, ui_dir):
+    transcript = _translated_transcript()
+    transcript["segments"][0]["speaker"] = "SPEAKER_00"
+    src = ui_dir / "translations" / "argos" / "Test Title.json"
+    src.write_text(json.dumps(transcript))
+
+    (ui_dir / "diarizations").mkdir(exist_ok=True)
+    (ui_dir / "diarizations" / "Test Title.json").write_text(
+        json.dumps(
+            {
+                "speakers": ["SPEAKER_00"],
+                "segments": [{"start_s": 0.0, "end_s": 2.5, "speaker": "SPEAKER_00"}],
+                "speaker_profiles": {"SPEAKER_00": {"gender": "female"}},
+            }
+        )
+    )
+
+    monkeypatch.setattr("api.src.routers.tts.resolve_title", lambda video_id: "Test Title")
+    monkeypatch.setattr(
+        "api.src.routers.tts.build_speaker_voice_map",
+        lambda speakers_dir, target_language, speaker_ids, speaker_profiles: {
+            "SPEAKER_00": "es/female.wav"
+        },
+    )
+
+    seen_kwargs = {}
+
+    def fake_tts(source_path, output_path, tts_engine=None, alignment=False, **kwargs):
+        seen_kwargs.update(kwargs)
+        wav = pathlib.Path(output_path) / "Test Title.wav"
+        wav.write_bytes(b"RIFF" + b"\x00" * 100)
+
+    monkeypatch.setattr("api.src.services.tts_service.tts_text_file_to_speech", fake_tts)
+
+    resp = client.post("/api/tts/G3Eup4mfJdA?config=c-0000000&alignment=true")
+    assert resp.status_code == 200
+    assert seen_kwargs["voice_map"] == {"SPEAKER_00": "es/female.wav"}
+
+
+def test_tts_rebuilds_cached_audio_when_report_lacks_speaker_metadata(client, monkeypatch, ui_dir):
+    transcript = _translated_transcript()
+    transcript["segments"][0]["speaker"] = "SPEAKER_00"
+    src = ui_dir / "translations" / "argos" / "Test Title.json"
+    src.write_text(json.dumps(transcript))
+
+    config_dir = ui_dir / "tts_audio" / "chatterbox" / "c-0000000"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "Test Title.wav").write_bytes(b"RIFF" + b"\x00" * 100)
+    (config_dir / "Test Title.align.json").write_text(
+        json.dumps({"alignment_enabled": True, "segments": [{"index": 0, "speaker": None}]})
+    )
+
+    (ui_dir / "diarizations").mkdir(exist_ok=True)
+    (ui_dir / "diarizations" / "Test Title.json").write_text(
+        json.dumps(
+            {
+                "speakers": ["SPEAKER_00"],
+                "segments": [{"start_s": 0.0, "end_s": 2.5, "speaker": "SPEAKER_00"}],
+                "speaker_profiles": {"SPEAKER_00": {"gender": "female"}},
+            }
+        )
+    )
+
+    monkeypatch.setattr("api.src.routers.tts.resolve_title", lambda video_id: "Test Title")
+    monkeypatch.setattr(
+        "api.src.routers.tts.build_speaker_voice_map",
+        lambda speakers_dir, target_language, speaker_ids, speaker_profiles: {
+            "SPEAKER_00": "es/female.wav"
+        },
+    )
+
+    tts_called = {"count": 0}
+
+    def fake_tts(source_path, output_path, tts_engine=None, alignment=False, **kwargs):
+        tts_called["count"] += 1
+        (pathlib.Path(output_path) / "Test Title.wav").write_bytes(b"RIFF" + b"\x00" * 100)
+        (pathlib.Path(output_path) / "Test Title.align.json").write_text(
+            json.dumps(
+                {
+                    "alignment_enabled": True,
+                    "segments": [{"index": 0, "speaker": "SPEAKER_00", "speaker_wav": "es/female.wav"}],
+                }
+            )
+        )
+
+    monkeypatch.setattr("api.src.services.tts_service.tts_text_file_to_speech", fake_tts)
+
+    resp = client.post("/api/tts/G3Eup4mfJdA?config=c-0000000&alignment=true")
+    assert resp.status_code == 200
+    assert tts_called["count"] == 1

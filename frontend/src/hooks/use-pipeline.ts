@@ -10,6 +10,7 @@ import type {
   VideoVariant,
 } from "@/lib/types";
 import {
+  diarizeVideo,
   downloadVideo,
   transcribeVideo,
   translateVideo,
@@ -21,14 +22,21 @@ import { computeConfigEntries, type ConfigEntry } from "@/lib/config-id";
 const STAGES: PipelineStage[] = [
   "download",
   "transcribe",
+  "diarize",
   "translate",
   "tts",
   "stitch",
 ];
 
-function initialStages(): Record<PipelineStage, StageState> {
+function initialStages(settings?: StudioSettings): Record<PipelineStage, StageState> {
+  const diarizationEnabled = (settings?.diarization.length ?? 0) > 0;
   return Object.fromEntries(
-    STAGES.map((s) => [s, { status: "pending" as const }])
+    STAGES.map((s) => [
+      s,
+      s === "diarize" && !diarizationEnabled
+        ? { status: "skipped" as const }
+        : { status: "pending" as const },
+    ])
   ) as Record<PipelineStage, StageState>;
 }
 
@@ -72,7 +80,7 @@ function reducer(state: PipelineState, action: Action): PipelineState {
         ...state,
         status: "running",
         videoId: action.videoId,
-        stages: initialStages(),
+        stages: initialStages(action.settings),
         selectedStage: "download",
         variants: [
           ...state.variants.filter((v) => !newVariantIds.has(v.id)),
@@ -192,6 +200,9 @@ export function usePipeline() {
     try {
       const dl = await run("download", () => downloadVideo(video.url));
       await run("transcribe", () => transcribeVideo(dl.video_id, settings.useYoutubeCaptions));
+      if (settings.diarization.length > 0) {
+        await run("diarize", () => diarizeVideo(dl.video_id));
+      }
       await run("translate", () => translateVideo(dl.video_id, "es"));
 
       // Run TTS + stitch for each config entry.

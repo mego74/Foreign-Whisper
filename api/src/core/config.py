@@ -100,7 +100,7 @@ class Settings(BaseSettings):
     # Logfire write token — set via FW_LOGFIRE_WRITE_TOKEN (or put in .env)
     logfire_write_token: str = ""
 
-    model_config = {"env_prefix": "FW_"}
+    model_config = {"env_prefix": "FW_", "env_file": ".env", "extra": "ignore"}
 
     @model_validator(mode="after")
     def _sync_postgres_dsn_alias(self) -> "Settings":

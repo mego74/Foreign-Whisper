@@ -66,6 +66,15 @@ class TestExpandedSettings:
         s = Settings()
         assert s.debug is True
 
+    def test_settings_reads_from_dotenv(self, tmp_path):
+        from api.src.core.config import Settings
+
+        env_path = tmp_path / ".env"
+        env_path.write_text("FW_HF_TOKEN=test-token\n")
+
+        s = Settings(_env_file=env_path)
+        assert s.hf_token == "test-token"
+
     def test_cors_defaults(self):
         from api.src.core.config import Settings
 
@@ -116,6 +125,7 @@ class TestAppFactory:
         paths = list(app.openapi()["paths"].keys())
         assert any("/api/download" in p for p in paths)
         assert any("/api/transcribe" in p for p in paths)
+        assert any("/api/diarize" in p for p in paths)
         assert any("/api/translate" in p for p in paths)
         assert any("/api/tts" in p for p in paths)
         assert any("/api/stitch" in p for p in paths)

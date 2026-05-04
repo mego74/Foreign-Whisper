@@ -154,6 +154,18 @@ class MacSayClient:
     def __init__(self, voice: str | None = None):
         self.voice = voice or os.getenv("FW_SAY_VOICE", "Monica")
 
+    @staticmethod
+    def _voice_for_speaker_wav(speaker_wav: str | None, fallback_voice: str) -> str:
+        if not speaker_wav:
+            return fallback_voice
+
+        normalized = speaker_wav.replace("\\", "/").lower()
+        if normalized.endswith("/male.wav") or "/male." in normalized:
+            return os.getenv("FW_SAY_VOICE_MALE", "Eddy (Spanish (Mexico))")
+        if normalized.endswith("/female.wav") or "/female." in normalized:
+            return os.getenv("FW_SAY_VOICE_FEMALE", "Flo (Spanish (Mexico))")
+        return fallback_voice
+
     def tts_to_file(self, text: str, file_path: str, **kwargs) -> None:
         if not text or not text.strip():
             AudioSegment.silent(duration=250).export(file_path, format="wav")
@@ -163,7 +175,8 @@ class MacSayClient:
             tmp_path = pathlib.Path(tmp.name)
 
         try:
-            cmd = ["say", "-v", self.voice, "-o", str(tmp_path), text]
+            voice = self._voice_for_speaker_wav(kwargs.get("speaker_wav"), self.voice)
+            cmd = ["say", "-v", voice, "-o", str(tmp_path), text]
             subprocess.run(cmd, check=True, capture_output=True)
             audio, sr = sf.read(str(tmp_path))
             sf.write(file_path, audio, sr)
@@ -312,6 +325,23 @@ def _synthesize_raw(
 
     last_exc: Exception | None = None
     candidates = _candidate_texts(text)
+
+    # Local Coqui fallback is effectively single-speaker on this Mac path.
+    # When we have diarization-driven voice hints, prefer macOS say so male
+    # and female speakers remain audibly distinct even without Chatterbox.
+    if speaker_wav and not isinstance(tts_engine, (ChatterboxClient, MacSayClient)) and shutil.which("say"):
+        backup_engine = MacSayClient()
+        for candidate in candidates:
+            try:
+                backup_engine.tts_to_file(
+                    text=candidate,
+                    file_path=wav_path,
+                    speaker_wav=speaker_wav,
+                )
+                print("[tts] Using macOS say for speaker-aware local fallback")
+                return pathlib.Path(wav_path).read_bytes()
+            except Exception as exc:
+                last_exc = exc
 
     for candidate in candidates:
         try:
@@ -707,6 +737,7 @@ def text_file_to_speech(
                 "index": i,
                 "text": m["text"],
                 "speaker": m["speaker"],
+                "speaker_wav": m["speaker_wav"],
                 "target_sec": round(m["target_sec"], 3),
                 "stretch_factor": round(m["stretch_factor"], 3),
                 "raw_duration_s": round(seg_raw_duration, 3),
