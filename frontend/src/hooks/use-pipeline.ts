@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useReducer } from "react";
+import { useCallback, useReducer, useRef } from "react";
 import type {
   PipelineStage,
   PipelineState,
@@ -154,6 +154,13 @@ function reducer(state: PipelineState, action: Action): PipelineState {
 
 export function usePipeline() {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
+  const runTokenRef = useRef(0);
+  const runningRef = useRef(false);
+
+  const invalidateActiveRun = useCallback(() => {
+    runTokenRef.current += 1;
+    runningRef.current = false;
+  }, []);
 
   const selectStage = useCallback(
     (stage: PipelineStage) => dispatch({ type: "SELECT_STAGE", stage }),
@@ -166,21 +173,35 @@ export function usePipeline() {
   );
 
   const runPipeline = useCallback(async (video: Video, settings: StudioSettings) => {
+    if (runningRef.current) {
+      return;
+    }
+
+    runningRef.current = true;
+    const runToken = runTokenRef.current + 1;
+    runTokenRef.current = runToken;
+
+    const dispatchIfCurrent = (action: Action) => {
+      if (runTokenRef.current === runToken) {
+        dispatch(action);
+      }
+    };
+
     const configs = computeConfigEntries(settings);
-    dispatch({ type: "START", videoId: video.id, settings, configs });
+    dispatchIfCurrent({ type: "START", videoId: video.id, settings, configs });
 
     const run = async <T,>(
       stage: PipelineStage,
       fn: () => Promise<T>
     ): Promise<T> => {
-      dispatch({ type: "STAGE_ACTIVE", stage });
+      dispatchIfCurrent({ type: "STAGE_ACTIVE", stage });
       const t0 = performance.now();
       try {
         const result = await fn();
         const skipped = typeof result === "object" && result !== null && "skipped" in result
           ? (result as Record<string, unknown>).skipped === true
           : false;
-        dispatch({
+        dispatchIfCurrent({
           type: "STAGE_COMPLETE",
           stage,
           result,
@@ -189,7 +210,7 @@ export function usePipeline() {
         });
         return result;
       } catch (err) {
-        dispatch({
+        dispatchIfCurrent({
           type: "STAGE_ERROR",
           stage,
           error: err instanceof Error ? err.message : String(err),
@@ -209,19 +230,26 @@ export function usePipeline() {
       // Run TTS + stitch for each config entry.
       // SELECT_VARIANT before each iteration so STAGE_ERROR marks the correct variant.
       for (const cfg of configs) {
-        dispatch({ type: "SELECT_VARIANT", variantId: makeVariantId(video.id, cfg.id) });
+        dispatchIfCurrent({ type: "SELECT_VARIANT", variantId: makeVariantId(video.id, cfg.id) });
         const alignment = cfg.dubbing === "aligned";
         await run("tts", () => synthesizeSpeech(dl.video_id, cfg.id, alignment));
         await run("stitch", () => stitchVideo(dl.video_id, cfg.id));
       }
 
-      dispatch({ type: "PIPELINE_COMPLETE" });
+      dispatchIfCurrent({ type: "PIPELINE_COMPLETE" });
     } catch {
       // Error already dispatched in run()
+    } finally {
+      if (runTokenRef.current === runToken) {
+        runningRef.current = false;
+      }
     }
   }, []);
 
-  const reset = useCallback(() => dispatch({ type: "RESET" }), []);
+  const reset = useCallback(() => {
+    invalidateActiveRun();
+    dispatch({ type: "RESET" });
+  }, [invalidateActiveRun]);
 
   return { state, runPipeline, selectStage, selectVariant, reset };
 }
